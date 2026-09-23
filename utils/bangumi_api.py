@@ -77,6 +77,7 @@ class BangumiApi:
             if os.name == 'nt':
                 os.startfile('https://next.bgm.tv/demo/access-token')
             raise ValueError('BangumiApi: Unauthorized, access_token may wrong')
+        res.raise_for_status()
         return res.json()
 
     @functools.lru_cache

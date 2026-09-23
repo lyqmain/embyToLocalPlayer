@@ -3,6 +3,7 @@ chcp 65001
 :BEGIN
 cls
 
+set "PATH=%SystemRoot%\System32;%PATH%"
 set pythonPath="python"
 set pythonEmbed="%~dp0python_embed\python.exe"
 if exist %pythonEmbed% (

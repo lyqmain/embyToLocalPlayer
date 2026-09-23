@@ -94,8 +94,9 @@ def parse_received_data_emby(received_data):
         media_source_info = version_prefer_emby(media_sources) \
             if len(media_sources) > 1 and is_emby else media_sources[0]
         media_source_id = media_source_info['Id']
+    media_sources.sort(key=lambda x: x['Type'] != 'Default')
+    default_source_info = media_sources[0]
     # strm 多版本似乎找不到其他版本服务器文件路径，需要额外请求分集数据。不过不需要读盘模式，还好。
-    # 因此 strm 多版本 且 is_http_source 时，正确播放，但文件标题只有一种，先不处理。
     source_path = media_source_info['Path']  # strm 的时候和 file_path 不一致，是 strm 里的地址文本
     file_path = source_path if main_ep_info.get('Type') == 'TvChannel' else  main_ep_info['Path']  # 多版本时候有误，直播源时没有。
     is_strm = file_path != source_path and file_path.endswith('.strm') or media_source_info.get('Container') == 'strm'
@@ -104,21 +105,18 @@ def parse_received_data_emby(received_data):
     if not is_strm or (is_strm and not is_http_source):
         file_path = source_path
 
-    if is_strm and is_http_source and len(media_sources) > 1 and media_source_info['Name'] not in file_path:
+    if is_strm and is_http_source and len(media_sources) > 1 and media_source_info['Type'] != 'Default':
         source_map = {
             s['Id']: i['Path']
             for i in episodes_info
             for s in i.get('MediaSources', [])
-        }  # episodes_info 由油猴拦截点击，手动请求时，会包含多版本条目，此时会解决下方的路径错误问题。
+        }  # episodes_info 由油猴拦截点击，手动请求时，会包含多版本条目，此时会解决下方的路径错误问题。4.9 非管理员 可能不全。
         if media_source_id in source_map:
             file_path = source_map[media_source_id]
         else:
-            basename = os.path.basename(file_path)
             # Season 0/S0E04-ver-a.strm Specials/S0E04-ver-b.strm 这种情况也可能导致路径文件夹名称拼装错误。
-            for _m in media_sources:
-                if _m['Name'] in basename:  # S01E01.mkv 这种无解
-                    file_path = file_path.replace(_m['Name'], media_source_info['Name'])
-                    break
+            path_prefix, path_suffix = file_path.rsplit(default_source_info['Name'], 1)
+            file_path = f'{path_prefix}{media_source_info["Name"]}{path_suffix}'
 
     # stream_url = f'{scheme}://{netloc}{media_source_info["DirectStreamUrl"]}' # 可能为转码后的链接
     basename = os.path.basename(file_path)
@@ -763,6 +761,7 @@ def list_episodes(data: dict):
         ))
         return result
 
+    params.update({'Fields': 'MediaSources,Path,ProviderIds,AlternateMediaSources'})
     if playlist_info:
         # jellyfin 花絮 疑似也会被当作播放列表数据。
         def chunk_list(lst, chunk_size):
@@ -772,8 +771,7 @@ def list_episodes(data: dict):
         ids = [ep['Id'] for ep in playlist_info][:200]
         _eps_parts = []
         for _ids in chunk_list(ids, 200):
-            params.update({'Fields': 'MediaSources,Path,ProviderIds',
-                           'Ids': ','.join(_ids), })
+            params.update({'Ids': ','.join(_ids), })
             _episodes = requests_urllib(
                 f'{scheme}://{netloc}{extra_str}/Users/{user_id}/Items',
                 params=params, headers=headers, get_json=True)
@@ -785,8 +783,7 @@ def list_episodes(data: dict):
             logger.info(f'playlist_info items count: {len(ids)}, may too large')
 
     else:
-        params.update({'Fields': 'MediaSources,Path,ProviderIds',
-                       'SeasonId': season_id, })
+        params.update({'SeasonId': season_id, })
         series_id = main_ep_info['SeriesId']
         if not season_id:  # Jellyfin 10.10.7 未知季: mainEpInfo 缺失季 id，导致请求失败。10.9.11 10.11.1 正常。
             season_id = series_id
@@ -811,7 +808,54 @@ def list_episodes(data: dict):
             logger.error(f'disable playlist, Path miss')
             return [fill_data_type_provider_ids()]
 
+    def fill_miss_eps_item(episodes_data):
+        # 4.9以上的非管理员缺少多版本条目，所以需要扁平化多版本。
+        # 扁平化后判断体积时长等最好从 MediaSources 里判断，不然可能有误。
+        if main_ep_info['CanDelete'] or match_version_range(data['server_version'], '0-4.8'):
+            return episodes_data
+
+        id_set = set()
+        flat_eps = []
+        for ep in episodes_data:
+            ep_id = ep['Id']
+            df_so = ep['MediaSources'][0]
+            if ep_id not in id_set:
+                new_item = ep.copy()
+                new_item['MediaSources'] = [df_so]
+                id_set.add(ep_id)
+                flat_eps.append(new_item)
+            if len(ep['MediaSources']) == 1:
+                continue
+            base_path = ep['Path']
+            base_tag = df_so['Name']
+            path_prefix, path_suffix = base_path.rsplit(base_tag, 1)
+            for so in ep['MediaSources'][1:]:
+                so_id = so['ItemId']
+                if so_id in id_set:
+                    continue
+                new_item = ep.copy()
+                if so['IsRemote']:
+                    new_path = f'{path_prefix}{so["Name"]}{path_suffix}'
+                    new_item['Path'] = new_path
+                else:
+                    new_item['Path'] = so['Path']
+                new_item['MediaSources'] = [so]
+                new_item['Id'] = so_id
+                new_item['Size'] = so['Size']
+                id_set.add(so_id)
+                flat_eps.append(new_item)
+        return flat_eps
+
+    # all_ep_ids = list(dict.fromkeys(
+    #     so['ItemId'] for ep in episodes['Items'] for so in ep['MediaSources']
+    # ))
+    # params.update({'Ids': ','.join(all_ep_ids), }) # 4.9.5 无效，非管理员无法查询多版本的id
+
+
     episodes = [i for i in episodes['Items'] if 'Path' in i]
+    for _ in episodes:
+        _['MediaSources'].sort(key=lambda x: x['Type'] != 'Default')
+    episodes = fill_miss_eps_item(episodes)
     episodes = strm_file_name_sync(data['file_path'], episodes)
     episodes = version_filter(data['file_path'], episodes) if data['server'] == 'emby' else episodes
     episodes = [parse_item(i, o) for (o, i) in enumerate(episodes)]
