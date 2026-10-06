@@ -17,8 +17,34 @@ from utils.tools import activate_window_by_pid
 logger = MyLogger()
 prefetch_data = dict(on=True, stop_sec_dict={}, done_list=[])
 pipe_port_stack = list(reversed(range(25)))
-mpv_play_speed = {'media_title': 'speed'}
 
+
+class MpvPersonal:
+    settings = {
+        'speed': {'series_key': 'speed'},
+        'intro_start': {'series_key': 'start_sec'},
+    }
+
+    def __init__(self, data, bind_cmd):
+        self.series_key = ''
+        if series_name := data.get('SeriesName'):
+            self.series_key = f'{series_name}-{data["SeriesId"]}'
+        self.bind_cmd = bind_cmd
+        if bind_cmd not in self.settings:
+            raise ValueError(f'bind_cmd must in {self.settings.keys()}')
+        logger.info(f'{self.series_key} {id(self.settings)=} {self.settings=}')
+
+    def get(self):
+        if not self.series_key:
+            logger.info(f'{self.series_key=}')
+            return
+        return self.settings[self.bind_cmd].get(self.series_key)
+
+    def set(self, value):
+        if not self.series_key:
+            logger.info(f'{self.series_key=}')
+            return
+        self.settings[self.bind_cmd][self.series_key] = value
 
 # *_player_start 返回获取播放时间等操作所需参数字典
 # stop_sec_* 接收字典参数
@@ -93,6 +119,10 @@ def mpv_player_start(cmd, start_sec=None, sub_file=None, media_title=None, get_s
             pass
         else:
             cmd.append(f'--start={start_sec}')
+    p_start = MpvPersonal(data['main_ep_info'], 'intro_start')
+    intro_cached = p_start.get()
+    if not start_sec and intro_cached:
+        cmd.append(f'--start={intro_cached}')
     if is_darwin:
         cmd.append('--focus-on=open')
     cmd.append(fr'--input-ipc-server={cmd_pipe}')
@@ -133,14 +163,19 @@ def mpv_player_start(cmd, start_sec=None, sub_file=None, media_title=None, get_s
                     callbacks = {i for i in callbacks if 'fist_ep_intro_adder' not in str(i)}
                     mpv.event_bindings[event_name] = callbacks
 
-    if speed := mpv_play_speed.get(media_title):
-        mpv.command('set_property', 'speed', speed)
+    @mpv.on_event('client-message')
+    def cache_intro_start(msg):
+        args = msg['args']
+        if len(args) == 2 and args[0] == 'intro-start-sec':
+            p_start.set(int(args[1]))
+            logger.info(f'lua set found, {p_start.settings}')
+
+    intro_cached and mpv.command('script-message', 'etlp-intro-cached', intro_cached)
     if not get_stop_sec:
         return
-    if mpv:
-        mpv.command('script-message', 'etlp-cmd-pipe', cmd_pipe)
-        mpv.is_iina = is_iina
-        mpv.is_mpvnet = is_mpvnet
+    mpv.command('script-message', 'etlp-cmd-pipe', cmd_pipe)
+    mpv.is_iina = is_iina
+    mpv.is_mpvnet = is_mpvnet
     return dict(mpv=mpv)
 
 
@@ -302,7 +337,6 @@ def stop_sec_mpv(mpv: MPV, stop_sec_only=True, **_):
         try:
             media_title = mpv.command('get_property', 'media-title')
             tmp_sec = mpv.command('get_property', 'time-pos')
-            speed = mpv.command('get_property', 'speed')
 
             chapters_raw = mpv.command('get_property', 'chapter-list') if dura_start else None
             chapter_index = mpv.command('get_property', 'chapter') if dura_start else None
@@ -310,7 +344,6 @@ def stop_sec_mpv(mpv: MPV, stop_sec_only=True, **_):
             if not tmp_sec:
                 print('.', end='')
             else:
-                mpv_play_speed[media_title] = speed
                 stop_sec = tmp_sec
                 if not stop_sec_only:
                     name_stop_sec_dict[media_title] = tmp_sec

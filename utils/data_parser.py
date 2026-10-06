@@ -803,7 +803,7 @@ def list_episodes(data: dict):
         except KeyError:
             logger.error('disable playlist, IndexNumber miss')
             return [fill_data_type_provider_ids()]
-        logger.error(f'some ep miss path or runtime data, may leak error\n{eps_error}')
+        logger.error(f'some ep miss path or runtime data, may leak error\n{eps_error[:10]}...{len(eps_error)=}')
         if data['media_source_id'] in ids_error:
             logger.error(f'disable playlist, Path miss')
             return [fill_data_type_provider_ids()]
@@ -818,18 +818,19 @@ def list_episodes(data: dict):
         flat_eps = []
         for ep in episodes_data:
             ep_id = ep['Id']
-            df_so = ep['MediaSources'][0]
+            ep_so = ep['MediaSources']
+            df_so = ep_so[0]
             if ep_id not in id_set:
                 new_item = ep.copy()
                 new_item['MediaSources'] = [df_so]
                 id_set.add(ep_id)
                 flat_eps.append(new_item)
-            if len(ep['MediaSources']) == 1:
+            if len(ep_so) == 1:
                 continue
             base_path = ep['Path']
             base_tag = df_so['Name']
             path_prefix, path_suffix = base_path.rsplit(base_tag, 1)
-            for so in ep['MediaSources'][1:]:
+            for so in ep_so[1:]:
                 so_id = so['ItemId']
                 if so_id in id_set:
                     continue

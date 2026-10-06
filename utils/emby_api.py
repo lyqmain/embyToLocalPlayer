@@ -15,11 +15,10 @@ class EmbyApi:
             from requests.packages import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self.req.headers.update({'Accept': 'application/json'})
-        self.req.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                                               '(KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36',
+        self.req.headers.update({'User-Agent': 'embyToLocalPlayer/1.1',
                                  'Referer': f'{self.host}/web/index.html',
-                                 'X-Emby-Authorization': f'MediaBrowser Client="EmbyApi",Token="{self.api_key}"',
-                                 'Authorization': f'MediaBrowser Client="EmbyApi",Token="{self.api_key}"',
+                                 'X-Emby-Authorization': f'MediaBrowser Client="embyToLocalPlayer",Token="{self.api_key}"',
+                                 'Authorization': f'MediaBrowser Client="embyToLocalPlayer",Token="{self.api_key}"',
                                  })
         self._default_fields = ','.join([
             'PremiereDate',
@@ -77,15 +76,66 @@ class EmbyApi:
         res = self.get(f'Shows/{item_id}/Seasons')
         return res
 
-    def get_episodes(self, item_id, season_id=None, get_user_data=False, get_sources=False):
+    # 可能会有副作用，建议调用前先判断非管理员和高版本
+    @staticmethod
+    def flat_multi_ver_source_episodes(episodes):
+        old = episodes
+        episodes = old['Items']
+        for _ in episodes:
+            _['MediaSources'].sort(key=lambda x: x['Type'] != 'Default')  # 低版本的好像没这个值，但不影响
+
+        def fill_miss_eps_item(episodes_data):
+            # 4.9以上的非管理员缺少多版本条目，所以需要扁平化多版本。
+            # 扁平化后判断体积时长等最好从 MediaSources 里判断，不然可能有误。
+
+            id_set = set()
+            flat_eps = []
+            for ep in episodes_data:
+                ep_id = ep['Id']
+                ep_so = ep['MediaSources']
+                df_so = ep_so[0]
+                if ep_id not in id_set:
+                    new_item = ep.copy()
+                    new_item['MediaSources'] = [df_so]
+                    id_set.add(ep_id)
+                    flat_eps.append(new_item)
+                if len(ep_so) == 1:
+                    continue
+                base_path = ep['Path']
+                base_tag = df_so['Name']
+                path_prefix, path_suffix = base_path.rsplit(base_tag, 1)
+                for so in ep_so[1:]:
+                    so_id = so['ItemId']
+                    if so_id in id_set:
+                        continue
+                    new_item = ep.copy()
+                    if so['IsRemote']:
+                        new_path = f'{path_prefix}{so["Name"]}{path_suffix}'
+                        new_item['Path'] = new_path
+                    else:
+                        new_item['Path'] = so['Path']
+                    new_item['MediaSources'] = [so]
+                    new_item['Id'] = so_id
+                    new_item['Size'] = so['Size']
+                    id_set.add(so_id)
+                    flat_eps.append(new_item)
+            return flat_eps
+
+        episodes = fill_miss_eps_item(episodes)
+        old['Items'] = episodes
+        return old
+
+    def get_episodes(self, item_id, season_id=None, get_user_data=False, get_sources=False, flat_multi_ver=False):
         params = {'SeasonId': season_id} if season_id else {}
         if get_user_data:
             if not self.user_id:
                 raise ValueError('get_user_data require user id')
             params.update({'UserId': self.user_id})
         if get_sources:
-            params.update({'Fields': 'MediaSources,Path,ProviderIds'})
+            params.update({'Fields': 'MediaSources,Path,ProviderIds,AlternateMediaSources'})
         res = self.get(f'Shows/{item_id}/Episodes', params=params)
+        if get_sources and flat_multi_ver:
+            res = self.flat_multi_ver_source_episodes(res)
         return res
 
     def get_playback_info(self, item_id):

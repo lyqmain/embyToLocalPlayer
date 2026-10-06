@@ -264,7 +264,7 @@ class TraktApi:
         if not self.access_token.get('access_token'):
             return
         expires_time = self.access_token['created_at'] + self.access_token['expires_in']
-        if expires_time > time.time() + 7 * 86400:
+        if expires_time > time.time() + 1 * 86400:
             self.req.headers.update({'Authorization': f'Bearer {self.access_token["access_token"]}'})
             return True
 

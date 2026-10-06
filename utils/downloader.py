@@ -145,7 +145,7 @@ class Downloader:
         if open_mode == 'wb':
             create_sparse_file(self.file, size=self.size)
             open_mode = 'r+b'
-        headers = {'Range': f'bytes={start}-{end}'}
+        headers = {'Range': f'bytes={start}-{end}', 'User-Agent': 'embyToLocalPlayer/dl'}
         try:
             resp = requests_urllib(self.url, headers=headers, http_proxy=configs.dl_proxy, res_only=True, timeout=10)
         except Exception as e:
