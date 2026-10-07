@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Union
 
 from utils.configs import configs, MyLogger
+from utils.proxy_bypass import BypassProxyHandler, url_bypasses_proxy
 
 ssl_context = ssl.SSLContext() if configs.raw.getboolean('dev', 'skip_certificate_verify', fallback=False) else None
 bangumi_api_cache = {'cache_time': time.time(), 'bangumi': None}
@@ -75,7 +76,8 @@ def requests_urllib(host, params=None, _json=None, decode=False, timeout=5.0, he
     host = safe_url(host)
     req = urllib.request.Request(host, method=method)
     http_proxy = http_proxy or configs.script_proxy
-    if http_proxy and not host.startswith(('http://127.0.0.1', 'http://localhost')):
+    if (http_proxy and not host.startswith(('http://127.0.0.1', 'http://localhost'))
+            and not url_bypasses_proxy(host)):
         if 'plex.direct' not in host:
             req.set_proxy(http_proxy, 'http')
         if host.startswith('https'):
@@ -88,10 +90,12 @@ def requests_urllib(host, params=None, _json=None, decode=False, timeout=5.0, he
     if req_only:
         return req
 
+    opener = urllib.request.build_opener(
+        BypassProxyHandler(), urllib.request.HTTPSHandler(context=ssl_context))
     response = None
     for try_times in range(1, retry + 1):
         try:
-            response = urllib.request.urlopen(req, _json, timeout=timeout, context=ssl_context)
+            response = opener.open(req, _json, timeout=timeout)
             if res_only:
                 return response
             break
@@ -182,6 +186,7 @@ def get_redirect_url(url, key_trim='PlaySessionId', follow_redirect=False):
         # FollowHTTPRedirectHandler, # 系统代理有可能很慢，默认不启用
         timeout = 30 if follow_redirect else 5
         handlers = [
+            BypassProxyHandler(),
             urllib.request.HTTPSHandler(context=ssl_context),
             redirect_handler,
         ]
