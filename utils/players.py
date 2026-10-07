@@ -11,6 +11,7 @@ from html.parser import HTMLParser
 from utils.configs import configs, MyLogger
 from utils.data_parser import list_episodes
 from utils.net_tools import requests_urllib, save_sub_file
+from utils.proxy_bypass import url_bypasses_proxy
 from utils.python_mpv_jsonipc import MPV
 from utils.tools import activate_window_by_pid
 
@@ -79,6 +80,9 @@ def mpv_player_start(cmd, start_sec=None, sub_file=None, media_title=None, get_s
     intro_start, intro_end = data.get('intro_start'), data.get('intro_end')
     is_darwin = True if platform.system() == 'Darwin' else False
     is_iina = True if 'iina-cli' in cmd[0] else False
+    media_url = next((arg for arg in cmd[1:] if arg.startswith(('http://', 'https://'))), '')
+    bypass_iina_proxy = (is_darwin and is_iina and not mount_disk_mode
+                         and url_bypasses_proxy(media_url))
     is_mpvnet = True if 'mpvnet' in cmd[0] else False
     pipe_name = get_pipe_or_port_str(get_pipe=True)
     cmd_pipe = fr'\\.\pipe\{pipe_name}' if os.name == 'nt' else f'/tmp/{pipe_name}.pipe'
@@ -111,7 +115,10 @@ def mpv_player_start(cmd, start_sec=None, sub_file=None, media_title=None, get_s
         cmd.append(f'--osd-playing-msg={osd_title}')
     if not mount_disk_mode:
         cmd.append('--force-window=immediate')
-        if proxy := configs.player_proxy:
+        if bypass_iina_proxy:
+            cmd = [arg for arg in cmd if not arg.startswith(('--http-proxy=', '--mpv-http-proxy='))]
+            cmd.append('--http-proxy=')
+        elif proxy := configs.player_proxy:
             cmd.append(f'--http-proxy=http://{proxy}')
     if start_sec is not None:
         if is_iina and mount_disk_mode:
@@ -133,8 +140,17 @@ def mpv_player_start(cmd, start_sec=None, sub_file=None, media_title=None, get_s
         cmd.append('--no-audio')
         # cmd.append('--no-video')
     cmd = ['--mpv-' + i.replace('--', '', 1) if is_darwin and is_iina and i.startswith('--') else i for i in cmd]
+    if is_darwin and is_iina:
+        cmd.insert(1, '--no-stdin')
+
+    player_env = os.environ
+    if bypass_iina_proxy:
+        player_env = os.environ.copy()
+        for key in ('http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY'):
+            player_env.pop(key, None)
+        logger.info(f'IINA proxy bypass: {urllib.parse.urlsplit(media_url).hostname}')
     logger.info(f'{cmd[:2]}\nargs={cmd[2:]}')
-    player = subprocess.Popen(cmd, env=os.environ)
+    player = subprocess.Popen(cmd, env=player_env)
     activate_window_by_pid(player.pid)
 
     mpv = init_player_instance(MPV, start_mpv=False, ipc_socket=pipe_name)
@@ -295,7 +311,7 @@ def playlist_add_mpv(mpv: MPV, data, eps_data=None, limit=10):
         try:
             if configs.raw.getboolean('dev', 'mpv_ipc_playlist_data', fallback=False):
                 mpv.command('script-message', 'etlp-playlist-data', json.dumps(playlist_data, ensure_ascii=False))
-            mpv.wait_for_property('time-pos')  # 太早添加可能会导致播放第一个文件，而不是命令行指定文件。#193
+            mpv.wait_for_property('time-pos')
             suf_thread = threading.Thread(target=loop_episodes, args=(suf_list,))
             pre_thread = threading.Thread(target=loop_episodes, args=(reversed(pre_list), True))
             _ = [suf_thread.start(), pre_thread.start()]
